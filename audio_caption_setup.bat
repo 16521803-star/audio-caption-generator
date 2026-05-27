@@ -89,5 +89,5 @@ if not exist "run.bat" (
 
 echo Press any key to launch the app now...
 pause >nul
-call .venv\Scripts\activate.bat
-python app.py
+.venv\Scripts\python.exe app.py
+

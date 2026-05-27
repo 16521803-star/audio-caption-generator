@@ -1,0 +1,21 @@
+# Python virtual environment
+.venv/
+venv/
+ENV/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local output files (generated captions/audio)
+output/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Gemini/System generated logs
+.system_generated/
+.gemini/

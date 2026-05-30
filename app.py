@@ -236,6 +236,33 @@ def export_edited(
 
 
 # ---------------------------------------------------------------------------
+# ChatGPT prompt preparation
+# ---------------------------------------------------------------------------
+
+CHATGPT_PROMPT_TEMPLATE = """Bạn là chuyên gia hiệu đính phụ đề tiếng Việt. Hãy sửa các lỗi nhận dạng giọng nói trong phụ đề dưới đây.
+
+Quy tắc bắt buộc:
+- GIỮ NGUYÊN toàn bộ cấu trúc dòng và timestamp [MM:SS]
+- GIỮ NGUYÊN số lượng dòng, không thêm, không xóa dòng nào
+- Chỉ sửa các từ bị nhận dạng sai ý nghĩa (ví dụ: "đang trái" → "đang cháy")
+- Giữ nguyên những từ đã chính xác, không viết lại tùy tiện
+- Không tóm tắt, không thêm giải thích, chỉ trả về toàn bộ phụ đề đã sửa
+
+Phụ đề cần sửa:
+{captions}"""
+
+
+def prepare_chatgpt_prompt(caption_text: str) -> str:
+    """
+    Combine the ChatGPT correction prompt template with the current caption text.
+    Returns the full text ready to paste into ChatGPT.
+    """
+    if not caption_text or not caption_text.strip():
+        raise gr.Error("Caption editor is empty. Generate captions first.")
+    return CHATGPT_PROMPT_TEMPLATE.format(captions=caption_text.strip())
+
+
+# ---------------------------------------------------------------------------
 # Gradio UI
 # ---------------------------------------------------------------------------
 
@@ -466,6 +493,50 @@ def build_ui() -> gr.Blocks:
                 )
                 export_edit_status = gr.Markdown("")
 
+                gr.HTML('<div style="margin-top:1rem;border-top:1px solid rgba(124,58,237,.25);padding-top:1rem">')
+                gr.Markdown("### 🤖 Fix with ChatGPT")
+                gr.Markdown(
+                    "_Click **Prepare Prompt** to generate a ready-to-paste ChatGPT prompt "
+                    "that will correct Vietnamese transcription errors while keeping all timestamps intact. "
+                    "After ChatGPT replies, paste the corrected text back into the Caption Editor above and click **Export Edited Captions**._"
+                )
+                chatgpt_btn = gr.Button(
+                    "🤖  Prepare ChatGPT Prompt",
+                    variant="secondary",
+                    elem_id="chatgpt-btn",
+                )
+                chatgpt_prompt_box = gr.Textbox(
+                    label="📋 ChatGPT Prompt (copy everything below and paste into ChatGPT)",
+                    placeholder="Click 'Prepare ChatGPT Prompt' to generate...",
+                    lines=12,
+                    max_lines=20,
+                    interactive=False,
+                    elem_id="chatgpt-prompt-box",
+                )
+                gr.HTML(
+                    '<button id="copy-chatgpt-btn"'
+                    ' onclick="'
+                    'const ta=document.querySelector(\'#chatgpt-prompt-box textarea\');'
+                    'if(!ta||!ta.value){alert(\'Generate the prompt first!\');return;}'
+                    'navigator.clipboard.writeText(ta.value).then(()=>{'
+                    'this.textContent=\'Copied!\';'
+                    'this.style.background=\'linear-gradient(135deg,#059669,#10b981)\';'
+                    'setTimeout(()=>{this.textContent=\'Copy Prompt to Clipboard\';this.style.background=\'\';},2500);'
+                    '}).catch(()=>{ta.select();document.execCommand(\'copy\');'
+                    'this.textContent=\'Copied!\';'
+                    'setTimeout(()=>this.textContent=\'Copy Prompt to Clipboard\',2500);});'
+                    '"'
+                    ' style="margin-top:0.5rem;padding:0.65rem 1.2rem;'
+                    'background:linear-gradient(135deg,#7C3AED,#06B6D4);'
+                    'color:#fff;border:none;border-radius:8px;'
+                    'font-weight:600;font-size:0.95rem;cursor:pointer;'
+                    'transition:opacity .2s;width:100%;"'
+                    ' onmouseover="this.style.opacity=\'.85\'"'
+                    ' onmouseout="this.style.opacity=\'1\'"'
+                    ">Copy Prompt to Clipboard</button>"
+                )
+                gr.HTML('</div>')
+
         # ── Footer ─────────────────────────────────────────────────────────
         gr.HTML("""
         <div class="app-footer">
@@ -498,6 +569,12 @@ def build_ui() -> gr.Blocks:
             fn=export_edited,
             inputs=[caption_output, raw_segments_state, srt_cb, vtt_cb, txt_cb],
             outputs=[download_files, export_edit_status],
+        )
+
+        chatgpt_btn.click(
+            fn=prepare_chatgpt_prompt,
+            inputs=[caption_output],
+            outputs=[chatgpt_prompt_box],
         )
 
     return demo

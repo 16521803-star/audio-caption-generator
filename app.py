@@ -252,14 +252,22 @@ Phụ đề cần sửa:
 {captions}"""
 
 
-def prepare_chatgpt_prompt(caption_text: str) -> str:
+def prepare_chatgpt_prompt(raw_segments: list | None) -> str:
     """
-    Combine the ChatGPT correction prompt template with the current caption text.
-    Returns the full text ready to paste into ChatGPT.
+    Build a ChatGPT correction prompt from ALL raw segments.
+    Formats every segment as [MM:SS]  text so ChatGPT sees the full caption.
     """
-    if not caption_text or not caption_text.strip():
-        raise gr.Error("Caption editor is empty. Generate captions first.")
-    return CHATGPT_PROMPT_TEMPLATE.format(captions=caption_text.strip())
+    if not raw_segments:
+        raise gr.Error("No transcription data found. Generate captions first.")
+
+    lines = []
+    for start, end, text in raw_segments:
+        m = int(start // 60)
+        s = int(start % 60)
+        lines.append(f"[{m:02d}:{s:02d}]  {text.strip()}")
+
+    all_captions = "\n".join(lines)
+    return CHATGPT_PROMPT_TEMPLATE.format(captions=all_captions)
 
 
 # ---------------------------------------------------------------------------
@@ -573,7 +581,7 @@ def build_ui() -> gr.Blocks:
 
         chatgpt_btn.click(
             fn=prepare_chatgpt_prompt,
-            inputs=[caption_output],
+            inputs=[raw_segments_state],
             outputs=[chatgpt_prompt_box],
         )
 

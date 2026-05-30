@@ -179,12 +179,9 @@ def process_audio(
 def export_edited(
     edited_text: str,
     raw_segments: list | None,
-    export_srt: bool,
-    export_vtt: bool,
-    export_txt: bool,
 ) -> tuple[list, str]:
     """
-    Re-export caption files using the user-edited preview text.
+    Re-export caption files as SRT using the user-edited preview text.
 
     The edited_text format is:  [MM:SS]  caption text\n...
     Timestamps are taken from raw_segments (original); only the text is replaced.
@@ -193,13 +190,6 @@ def export_edited(
         raise gr.Error("Caption editor is empty. Generate captions first.")
     if not raw_segments:
         raise gr.Error("No transcription data found. Please run Generate Captions first.")
-
-    selected_formats = [
-        fmt for fmt, enabled in [("srt", export_srt), ("vtt", export_vtt), ("txt", export_txt)]
-        if enabled
-    ]
-    if not selected_formats:
-        raise gr.Error("Please select at least one output format.")
 
     # Parse edited text lines: [MM:SS]  some text
     import re
@@ -229,10 +219,10 @@ def export_edited(
         segments=edited_segments,
         base_name=base_name,
         output_dir=str(OUTPUT_DIR),
-        formats=selected_formats,
+        formats=["srt"],
     )
 
-    return list(out_paths.values()), f"\u2705 Exported {', '.join(out_paths.keys()).upper()} with your edits!"
+    return list(out_paths.values()), f"\u2705 Exported SRT with your edits!"
 
 
 # ---------------------------------------------------------------------------
@@ -496,7 +486,7 @@ def build_ui() -> gr.Blocks:
                 )
 
                 export_edit_btn = gr.Button(
-                    "✏️  Export Edited Captions",
+                    "✏️  Export Edited Captions (SRT)",
                     variant="secondary",
                 )
                 export_edit_status = gr.Markdown("")
@@ -582,7 +572,7 @@ def build_ui() -> gr.Blocks:
 
         export_edit_btn.click(
             fn=export_edited,
-            inputs=[caption_output, raw_segments_state, srt_cb, vtt_cb, txt_cb],
+            inputs=[caption_output, raw_segments_state],
             outputs=[download_files, export_edit_status],
         )
 

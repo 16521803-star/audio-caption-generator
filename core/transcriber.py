@@ -38,6 +38,26 @@ LANGUAGE_MAP = {
     "Thai": "th",
 }
 
+# Translation target options — maps display label to Google Translate language code
+TRANSLATION_TARGETS = {
+    "None (Keep Original)": None,
+    "→ Vietnamese": "vi",
+    "→ English": "en",
+    "→ Spanish": "es",
+    "→ French": "fr",
+    "→ German": "de",
+    "→ Japanese": "ja",
+    "→ Korean": "ko",
+    "→ Chinese (Simplified)": "zh-CN",
+    "→ Portuguese": "pt",
+    "→ Italian": "it",
+    "→ Russian": "ru",
+    "→ Arabic": "ar",
+    "→ Hindi": "hi",
+    "→ Indonesian": "id",
+    "→ Thai": "th",
+}
+
 # Cache the loaded model to avoid re-loading on every call
 _model_cache: dict[str, WhisperModel] = {}
 
@@ -94,6 +114,97 @@ def load_model(model_size: str, device: str = "auto") -> WhisperModel:
 
 
 # ---------------------------------------------------------------------------
+# Translation
+# ---------------------------------------------------------------------------
+
+def translate_segments(
+    segments: list[tuple[float, float, str]],
+    target_lang: str,
+    progress_callback: Callable | None = None,
+) -> list[tuple[float, float, str]]:
+    """
+    Translate the text of each segment to target_lang using GoogleTranslator.
+
+    Segments are batched into chunks to minimise API calls while staying
+    under the per-request character limit (~4500 chars).
+
+    Parameters
+    ----------
+    segments : list of (start_sec, end_sec, text)
+    target_lang : str
+        Google Translate language code, e.g. 'vi', 'en', 'zh-CN'.
+    progress_callback : callable | None
+
+    Returns
+    -------
+    list of (start_sec, end_sec, translated_text)
+    """
+    try:
+        from deep_translator import GoogleTranslator
+    except ImportError:
+        if progress_callback:
+            progress_callback("⚠️ deep-translator not installed — skipping translation.")
+        return segments
+
+    if progress_callback:
+        progress_callback(f"🌐 Translating {len(segments)} segments to '{target_lang}'…")
+
+    translator = GoogleTranslator(source="auto", target=target_lang)
+    translated: list[tuple[float, float, str]] = []
+
+    # -- Chunk segments so each batch stays under 4500 chars ----------------
+    CHUNK_LIMIT = 4000
+    chunks: list[list[int]] = []   # list of lists of segment indices
+    current_chunk: list[int] = []
+    current_len = 0
+
+    for i, (_, _, text) in enumerate(segments):
+        t = text.strip()
+        if current_len + len(t) > CHUNK_LIMIT and current_chunk:
+            chunks.append(current_chunk)
+            current_chunk = [i]
+            current_len = len(t)
+        else:
+            current_chunk.append(i)
+            current_len += len(t)
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    # -- Translate each chunk -----------------------------------------------
+    result_texts: dict[int, str] = {}
+    for chunk_indices in chunks:
+        texts = [segments[i][2].strip() for i in chunk_indices]
+        try:
+            translated_batch = translator.translate_batch(texts)
+            if len(translated_batch) == len(texts):
+                for idx, trans_text in zip(chunk_indices, translated_batch):
+                    result_texts[idx] = trans_text or segments[idx][2]
+            else:
+                # Length mismatch — fall back to one-by-one
+                for idx, orig_text in zip(chunk_indices, texts):
+                    try:
+                        result_texts[idx] = translator.translate(orig_text) or orig_text
+                    except Exception:
+                        result_texts[idx] = segments[idx][2]
+        except Exception as e:
+            if progress_callback:
+                progress_callback(f"⚠️ Translation chunk failed ({e}) — keeping original for this batch.")
+            for idx in chunk_indices:
+                result_texts[idx] = segments[idx][2]
+
+    # -- Reconstruct segment list -------------------------------------------
+    translated = [
+        (start, end, result_texts.get(i, text))
+        for i, (start, end, text) in enumerate(segments)
+    ]
+
+    if progress_callback:
+        progress_callback(f"✅ Translation complete ({len(translated)} segments → '{target_lang}')")
+
+    return translated
+
+
+# ---------------------------------------------------------------------------
 # Transcription
 # ---------------------------------------------------------------------------
 
@@ -103,6 +214,7 @@ def transcribe(
     language: str | None = None,
     beam_size: int = 5,
     vad_filter: bool = True,
+    translate_to: str | None = None,
     progress_callback: Callable | None = None,
 ) -> tuple[list[tuple[float, float, str]], dict]:
     """
@@ -115,11 +227,14 @@ def transcribe(
     model_size : str
         Whisper model size (tiny / base / small / medium / large-v3).
     language : str | None
-        ISO 639-1 language code, or None for auto-detect.
+        ISO 639-1 language code for the *input* audio, or None for auto-detect.
     beam_size : int
         Beam search width. Higher = more accurate but slower.
     vad_filter : bool
         Use Voice Activity Detection to skip silent sections.
+    translate_to : str | None
+        If set, translate output captions to this language code (e.g. 'vi').
+        Uses deep-translator (Google Translate). None = no translation.
     progress_callback : callable | None
         Optional function(message: str) for progress reporting.
 
@@ -165,5 +280,9 @@ def transcribe(
             f"({info_dict['language_probability']}% confidence), "
             f"{len(segments)} segments"
         )
+
+    # -- Optional translation -----------------------------------------------
+    if translate_to:
+        segments = translate_segments(segments, translate_to, progress_callback)
 
     return segments, info_dict

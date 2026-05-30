@@ -18,7 +18,7 @@ import gradio as gr
 sys.path.insert(0, str(Path(__file__).parent))
 
 from core.audio_processor import adjust_speed, get_audio_duration
-from core.transcriber import transcribe, AVAILABLE_MODELS, LANGUAGE_MAP
+from core.transcriber import transcribe, AVAILABLE_MODELS, LANGUAGE_MAP, TRANSLATION_TARGETS
 from core.caption_writer import write_captions
 from utils.helpers import stem, get_temp_dir
 
@@ -30,6 +30,7 @@ OUTPUT_DIR = Path(__file__).parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 LANGUAGES = list(LANGUAGE_MAP.keys())
+TRANSLATION_OPTIONS = list(TRANSLATION_TARGETS.keys())
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -53,6 +54,7 @@ def process_audio(
     speed: float,
     model_size: str,
     language_label: str,
+    translate_label: str,
     export_srt: bool,
     export_vtt: bool,
     export_txt: bool,
@@ -83,6 +85,7 @@ def process_audio(
         raise gr.Error("Please select at least one output format (SRT / VTT / TXT).")
 
     language_code = LANGUAGE_MAP.get(language_label)
+    translate_to = TRANSLATION_TARGETS.get(translate_label)
     input_path: str = audio_file
 
     # ── Step 1: Speed adjustment ──────────────────────────────────────────────
@@ -114,6 +117,7 @@ def process_audio(
             language=language_code,
             beam_size=5,
             vad_filter=True,
+            translate_to=translate_to,
             progress_callback=log,
         )
     except Exception as e:
@@ -131,6 +135,8 @@ def process_audio(
     base_name = stem(input_path)
     if abs(speed - 1.0) >= 0.01:
         base_name += f"_{speed:.2f}x"
+    if translate_to:
+        base_name += f"_{translate_to}"
 
     out_paths = write_captions(
         segments=segments,
@@ -140,15 +146,7 @@ def process_audio(
     )
     log(f"📝 Written: {', '.join(out_paths.keys()).upper()}")
 
-    # ── Step 4: Save speed-adjusted audio ────────────────────────────────────
-    modified_audio_out = None
-    if tmp_audio_path and os.path.exists(tmp_audio_path):
-        dest = str(OUTPUT_DIR / Path(tmp_audio_path).name)
-        shutil.copy2(tmp_audio_path, dest)
-        modified_audio_out = dest
-        log("🎵 Speed-adjusted audio saved to output/")
-
-    # ── Step 5: Build outputs ─────────────────────────────────────────────────
+    # ── Step 4: Build outputs ─────────────────────────────────────────────────
     preview_lines = []
     for i, (start, end, text) in enumerate(segments[:30], start=1):
         preview_lines.append(f"[{_fmt_ts(start)}]  {text.strip()}")
@@ -157,22 +155,84 @@ def process_audio(
     caption_preview = "\n".join(preview_lines)
 
     duration_display = f"{info['duration']:.1f}s" if info["duration"] > 0 else "—"
+    translation_label = translate_label if translate_to else "None"
     stats = (
         f"**🌍 Language detected:** {info['language'].upper() if info['language'] else '?'} "
         f"({info['language_probability']}% confidence)\n\n"
         f"**⏱️ Audio duration:** {duration_display}\n\n"
         f"**📝 Segments:** {len(segments)}\n\n"
         f"**⚡ Speed applied:** {speed:.2f}×\n\n"
-        f"**🤖 Model used:** `{model_size}`"
+        f"**🤖 Model used:** `{model_size}`\n\n"
+        f"**🌐 Translation:** {translation_label}"
     )
-
-    download_files = list(out_paths.values())
-    if modified_audio_out:
-        download_files.append(modified_audio_out)
 
     progress(1.0, desc="Done!")
 
-    return caption_preview, stats, "\n".join(log_lines), download_files, modified_audio_out
+    return caption_preview, stats, "\n".join(log_lines), list(out_paths.values()), segments
+
+
+
+# ---------------------------------------------------------------------------
+# Caption editor — re-export from edited preview text
+# ---------------------------------------------------------------------------
+
+def export_edited(
+    edited_text: str,
+    raw_segments: list | None,
+    export_srt: bool,
+    export_vtt: bool,
+    export_txt: bool,
+) -> tuple[list, str]:
+    """
+    Re-export caption files using the user-edited preview text.
+
+    The edited_text format is:  [MM:SS]  caption text\n...
+    Timestamps are taken from raw_segments (original); only the text is replaced.
+    """
+    if not edited_text or not edited_text.strip():
+        raise gr.Error("Caption editor is empty. Generate captions first.")
+    if not raw_segments:
+        raise gr.Error("No transcription data found. Please run Generate Captions first.")
+
+    selected_formats = [
+        fmt for fmt, enabled in [("srt", export_srt), ("vtt", export_vtt), ("txt", export_txt)]
+        if enabled
+    ]
+    if not selected_formats:
+        raise gr.Error("Please select at least one output format.")
+
+    # Parse edited text lines: [MM:SS]  some text
+    import re
+    lines = [line for line in edited_text.strip().splitlines() if line.strip()]
+    # Filter out the "... and N more segments" trailer
+    lines = [l for l in lines if not l.startswith("\u2026") and not l.startswith("...")]
+
+    edited_texts: list[str] = []
+    for line in lines:
+        m = re.match(r"^\[\d{2}:\d{2}\]\s*(.*)$", line)
+        if m:
+            edited_texts.append(m.group(1).strip())
+        else:
+            # Line without timestamp prefix — append to last entry
+            if edited_texts:
+                edited_texts[-1] += " " + line.strip()
+
+    # Match edited texts back to original segments (by index)
+    # If user added/removed lines we fall back gracefully
+    edited_segments: list[tuple[float, float, str]] = []
+    for i, (start, end, _orig_text) in enumerate(raw_segments):
+        text = edited_texts[i] if i < len(edited_texts) else _orig_text
+        edited_segments.append((start, end, text))
+
+    base_name = "edited_captions"
+    out_paths = write_captions(
+        segments=edited_segments,
+        base_name=base_name,
+        output_dir=str(OUTPUT_DIR),
+        formats=selected_formats,
+    )
+
+    return list(out_paths.values()), f"\u2705 Exported {', '.join(out_paths.keys()).upper()} with your edits!"
 
 
 # ---------------------------------------------------------------------------
@@ -326,9 +386,16 @@ def build_ui() -> gr.Blocks:
                         language_dropdown = gr.Dropdown(
                             choices=LANGUAGES,
                             value="Auto-detect",
-                            label="Language",
-                            info="Auto-detect or pick manually",
+                            label="Audio Language",
+                            info="Language spoken in the audio",
                         )
+
+                    translation_dropdown = gr.Dropdown(
+                        choices=TRANSLATION_OPTIONS,
+                        value="None (Keep Original)",
+                        label="🌐 Translate Captions To",
+                        info="Translate the output captions to a different language (uses Google Translate)",
+                    )
 
                 with gr.Group():
                     gr.Markdown("### 📄 Output Formats")
@@ -361,12 +428,17 @@ def build_ui() -> gr.Blocks:
             with gr.Column(scale=6, min_width=400):
 
                 with gr.Tabs():
-                    with gr.Tab("📋 Caption Preview"):
+                    with gr.Tab("📋 Caption Preview & Editor"):
                         caption_output = gr.Textbox(
-                            label="First 30 segments",
-                            placeholder="Captions will appear here after processing…",
+                            label="Edit captions directly here, then click \u2018Export Edited\u2019 below",
+                            placeholder="Captions will appear here after processing. You can edit any line directly!",
                             lines=18,
                             max_lines=28,
+                            interactive=True,
+                        )
+                        gr.Markdown(
+                            "_✏️ **Tip:** Edit any text in the box above to fix transcription errors, "
+                            "then click **Export Edited Captions** to re-download with your corrections._",
                         )
 
                     with gr.Tab("📊 Stats"):
@@ -384,14 +456,15 @@ def build_ui() -> gr.Blocks:
 
                 gr.Markdown("### 📥 Downloads")
                 download_files = gr.Files(
-                    label="Caption files + speed-adjusted audio (if applicable)",
+                    label="Caption files (SRT / VTT / TXT)",
                     file_count="multiple",
                 )
 
-                audio_preview = gr.Audio(
-                    label="🎵 Speed-adjusted audio preview",
-                    type="filepath",
+                export_edit_btn = gr.Button(
+                    "✏️  Export Edited Captions",
+                    variant="secondary",
                 )
+                export_edit_status = gr.Markdown("")
 
         # ── Footer ─────────────────────────────────────────────────────────
         gr.HTML("""
@@ -403,18 +476,28 @@ def build_ui() -> gr.Blocks:
         </div>
         """)
 
+        # ── State for raw segments (needed by editor) ────────────────────────
+        raw_segments_state = gr.State(value=None)
+
         # ── Event wiring ────────────────────────────────────────────────────
         run_btn.click(
             fn=process_audio,
             inputs=[
                 audio_input, speed_slider, model_dropdown, language_dropdown,
+                translation_dropdown,
                 srt_cb, vtt_cb, txt_cb,
             ],
             outputs=[
                 caption_output, stats_output, log_output,
-                download_files, audio_preview,
+                download_files, raw_segments_state,
             ],
             api_name="generate_captions",
+        )
+
+        export_edit_btn.click(
+            fn=export_edited,
+            inputs=[caption_output, raw_segments_state, srt_cb, vtt_cb, txt_cb],
+            outputs=[download_files, export_edit_status],
         )
 
     return demo

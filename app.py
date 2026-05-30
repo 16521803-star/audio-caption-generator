@@ -179,6 +179,7 @@ def process_audio(
 def export_edited(
     edited_text: str,
     raw_segments: list | None,
+    audio_file: str | None,
 ) -> tuple[list, str]:
     """
     Re-export caption files as SRT using the user-edited preview text.
@@ -186,6 +187,9 @@ def export_edited(
     The edited_text format is:  [MM:SS]  caption text\n...
     Timestamps are taken from raw_segments (original); only the text is replaced.
     """
+    import time
+    t_start = time.time()
+
     if not edited_text or not edited_text.strip():
         raise gr.Error("Caption editor is empty. Generate captions first.")
     if not raw_segments:
@@ -214,15 +218,53 @@ def export_edited(
         text = edited_texts[i] if i < len(edited_texts) else _orig_text
         edited_segments.append((start, end, text))
 
-    base_name = "edited_captions"
+    # Name the file based on the audio name if available
+    if audio_file:
+        base_name = f"{stem(audio_file)}_edited"
+    else:
+        base_name = "edited_captions"
+
+    # Sanitize base_name to avoid any path/character issues
+    base_name = "".join(c for c in base_name if c.isalnum() or c in ("-", "_", ".")).strip()
+    if not base_name:
+        base_name = "edited_captions"
+
+    t_parse = time.time()
+    print(f"[Profiling] Parsing and segment matching took {t_parse - t_start:.4f} seconds")
+
     out_paths = write_captions(
         segments=edited_segments,
         base_name=base_name,
         output_dir=str(OUTPUT_DIR),
         formats=["srt"],
     )
+    
+    out_path = out_paths.get("srt")
+    t_write = time.time()
+    print(f"[Profiling] Writing captions to disk took {t_write - t_parse:.4f} seconds")
 
-    return list(out_paths.values()), f"\u2705 Exported SRT with your edits!"
+    status_msg = f"\u2705 Exported SRT with your edits!"
+
+    # Attempt to copy directly to user's system Downloads folder for instant access
+    if out_path and os.path.exists(out_path):
+        try:
+            downloads_dir = Path.home() / "Downloads"
+            if downloads_dir.exists():
+                dest_path = downloads_dir / f"{base_name}.srt"
+                shutil.copy2(out_path, dest_path)
+                status_msg = (
+                    f"\u2705 Exported SRT with your edits!\n\n"
+                    f"📂 **Saved directly to your Downloads folder:**\n"
+                    f"`{dest_path}`"
+                )
+                print(f"[Profiling] Copied file to Downloads folder at {dest_path}")
+        except Exception as e:
+            print(f"[Warning] Failed to copy to Downloads: {e}")
+
+    t_total = time.time() - t_start
+    print(f"[Profiling] Total export_edited execution took {t_total:.4f} seconds")
+
+    return list(out_paths.values()), status_msg
 
 
 # ---------------------------------------------------------------------------
@@ -572,7 +614,7 @@ def build_ui() -> gr.Blocks:
 
         export_edit_btn.click(
             fn=export_edited,
-            inputs=[caption_output, raw_segments_state],
+            inputs=[caption_output, raw_segments_state, audio_input],
             outputs=[download_files, export_edit_status],
         )
 
